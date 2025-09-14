@@ -1,12 +1,48 @@
 <?php
+define('NO_MOODLE_COOKIES', true); // щоб не створювати сесії при webservice-виклику
 require(__DIR__ . '/../../../config.php');
-require_login();
-require_capability('moodle/site:config', context_system::instance());
+require_once($CFG->libdir . '/externallib.php');
+require_once($CFG->libdir . '/filelib.php');
 
 header('Content-Type: application/json');
 
+global $DB;
+
+// Перевірка чи переданий webservice token
+$token = optional_param('wstoken', '', PARAM_ALPHANUMEXT);
+$validtoken = false;
+if (!empty($token)) {
+    try {
+        $tokendata = $DB->get_record('external_tokens', ['token' => $token, 'tokentype' => EXTERNAL_TOKEN_PERMANENT]);
+        if ($tokendata) {
+            $validtoken = true;
+            // Завантажуємо користувача токена
+            $USER = $DB->get_record('user', ['id' => $tokendata->userid]);
+            // Перевірка чи є права на адміністрування
+            if (!is_siteadmin($USER->id)) {
+                http_response_code(403);
+                echo json_encode(['error' => 'User has no admin rights']);
+                exit;
+            }
+            // Логінюємо користувача
+            \core\session\manager::set_user($USER);
+        }
+    } catch (Exception $e) {
+        http_response_code(403);
+        echo json_encode(['error' => 'Invalid token']);
+        exit;
+    }
+}
+
+if (!$validtoken) {
+    // Якщо токену немає → звичайна авторизація через сесію
+    require_login();
+    require_capability('moodle/site:config', context_system::instance());
+}
+
+// --- Збираємо дані ---
 $core = [
-    'version' => $CFG->release, // "4.5.5+ (Build: 20250718)"
+    'version' => $CFG->release, // приклад: "4.5.5+ (Build: 20250718)"
     'build'   => $CFG->version
 ];
 
@@ -20,7 +56,7 @@ $next_major_update = null;
 if (!empty($updates)) {
     foreach ($updates as $u) {
         if ($u->maturity == 50) {
-            // dev-версії ігноруємо
+            // dev версії не показуємо
             continue;
         }
         if (preg_match('/^(\d+\.\d+)/', $u->release, $matches)) {
@@ -30,7 +66,6 @@ if (!empty($updates)) {
         }
 
         if (strpos($CFG->release, $relbranch) === 0) {
-            // ця ж гілка (наприклад 4.5 → 4.5.6)
             if ($current_branch_update === null) {
                 $current_branch_update = [
                     'release' => $u->release,
@@ -39,7 +74,6 @@ if (!empty($updates)) {
                 ];
             }
         } else {
-            // інша major гілка (наприклад 5.0)
             if ($next_major_update === null) {
                 $next_major_update = [
                     'release' => $u->release,
@@ -52,7 +86,7 @@ if (!empty($updates)) {
     $core_status = 'outdated';
 }
 
-// список плагінів
+// --- Плагіни ---
 $pluginman = core_plugin_manager::instance();
 $plugins = $pluginman->get_plugins();
 
@@ -76,6 +110,7 @@ foreach ($plugins as $type => $list) {
     }
 }
 
+// --- Відповідь ---
 echo json_encode([
     'core' => $core,
     'core_status' => $core_status,
